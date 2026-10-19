@@ -6,6 +6,8 @@
 
 需要 Python 3.10 或更新版本。在终端执行：
 
+Windows 若没有 `python3` 命令，可用 `py -3` 创建虚拟环境；激活后其余命令仍使用 `python`。Linux 如浏览器报告缺少系统库，可运行 `python -m playwright install --with-deps chromium`（安装系统依赖可能需要管理员权限）。
+
 ```bash
 git clone https://github.com/Tan0740/weibo-corpus-collector.git
 cd weibo-corpus-collector
@@ -92,6 +94,7 @@ python collector.py --interactive-browser --keyword "那很了" --limit 500 --ou
 | 文件 | 内容 |
 | --- | --- |
 | `results/corpus.csv` | 编号、用户名、匹配表达、上下文和来源 |
+| `results/corpus.xlsx` | 自动排版的中文语料表与频率表，适合阅读、筛选和打印 |
 | `results/corpus_frequency.csv` | `rank` 排名、`corpus` 表达、`frequency` 频次、`unique_users` 独立用户名数 |
 | `results/corpus_frequency.svg` | 频次前 30 项柱状图，可在浏览器打开 |
 
@@ -101,17 +104,23 @@ python collector.py --interactive-browser --keyword "那很了" --limit 500 --ou
 python collector.py --frequency-only --output results/corpus.csv
 ```
 
-原始 CSV 字段：`number`（编号）、`username`（用户名）、`corpus`（匹配表达）、`comment_text`（上下文）、`source`（搜索页）、`note`（备注）、`weibo_id`（微博标识）、`comment_page_url`（移动版链接）、`post_text`（正文）。部分字段命名来自早期版本；当前采集的是微博正文，不是评论区。
+每次采集结束（包括在采集循环中按 Ctrl+C）都会自动更新同名 Excel，无需手动排版。Excel 使用中文表头、适配列宽、全文换行、交替行底色、筛选按钮和冻结表头；来源显示为可点击的“查看原文”。CSV 保留原始字段用于续采。CSV 不保存字体、颜色或列宽，请打开 `.xlsx` 阅读排版版本。长文本超过 Excel 最大行高时仍完整保存在单元格内，可在编辑栏查看。
+
+已安装旧版本的使用者需重新运行 `python -m pip install -r requirements.txt`，安装新增的 Excel 导出依赖。`--frequency-only` 也会重新生成排版后的 Excel。
+
+原始 CSV 字段：`number`（编号）、`username`（用户名）、`corpus`（匹配表达）、`comment_text`（正文语境）、`source`（搜索页）、`note`（备注）、`weibo_id`（微博标识）、`comment_page_url`（移动版链接）、`post_text`（正文）、`published_at`（可确认的发布时间）、`published_time_raw`（页面原始时间）、`full_text_status`（全文状态）。时间戳转换使用 UTC+08:00；仅有“几分钟前”时保留原文，不推算或捏造绝对日期。程序会尝试展开长微博，`full` 表示解析到全文节点，`visible_only` 表示仅有页面可见正文、未确认全文。部分字段命名来自早期版本；当前采集的是微博正文，不是评论区。
 
 ## 离线示例
 
-可以先运行虚构数据示例，检查提取、去重和统计输出，不需要微博登录、浏览器安装或第三方依赖：
+可以先运行虚构数据示例，检查提取、去重和统计输出，不需要微博登录或浏览器安装。生成 Excel 需要安装 requirements.txt 中的依赖：
 
 ```bash
 python demo.py
 ```
 
-5 条输入去重后保留 4 条记录：“那很好吃了”2 次，“那很幸运了”和“那很期待了”各 1 次。文件写入 `results/demo.csv`、`results/demo_frequency.csv` 和 `results/demo_frequency.svg`。重复运行只会重建这三个示例文件。
+5 条输入去重后保留 4 条记录：“那很好吃了”2 次，“那很幸运了”和“那很期待了”各 1 次。文件写入 `results/demo.csv`、`results/demo.xlsx`、`results/demo_frequency.csv` 和 `results/demo_frequency.svg`。重复运行会重建这四个示例文件。
+
+没有弹出浏览器时，请确认已执行 `python -m playwright install chromium`，并在带桌面界面的本机终端运行。在线采集需要使用者自己的微博账号，不附带任何共享账号或登录资料。若 Excel 正在打开同名输出文件，请先关闭再重新导出。
 
 ## 其他参数
 
