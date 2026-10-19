@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import collector
@@ -15,6 +15,62 @@ def post(username, text, identifier="1"):
 
 
 class CollectorTests(unittest.TestCase):
+    def test_search_url_requires_correct_host_and_keyword(self):
+        self.assertTrue(collector.is_keyword_search(collector.browser_realtime_search_url("那很了"), "那很了"))
+        self.assertFalse(collector.is_keyword_search("https://me.weibo.com/data/overview", "那很了"))
+        self.assertFalse(collector.is_keyword_search(collector.browser_realtime_search_url("太了"), "那很了"))
+
+    def test_login_redirect_returns_to_search_without_enter(self):
+        args = collector.parse_args([])
+        page = MagicMock()
+        page.url = "https://me.weibo.com/data/overview"
+        page.is_closed.return_value = False
+        page.goto.side_effect = lambda url, **kwargs: setattr(page, "url", url)
+        context = MagicMock()
+        context.pages = [page]
+        context.cookies.return_value = [{"name": "SUB", "value": "fictional"}]
+        with patch.object(collector, "require_lxml_html"), \
+             patch.object(collector, "parse_search_posts", return_value=[post("a", "那很好吃了")]), \
+             patch("builtins.input", side_effect=AssertionError("must not require Enter")):
+            selected, _, url = collector.wait_for_realtime_results(context, page, args)
+        self.assertIs(selected, page)
+        self.assertTrue(collector.is_keyword_search(url, args.keyword))
+        page.goto.assert_called_once()
+
+    def test_replaced_login_tab_selects_new_search_tab(self):
+        old, new = MagicMock(), MagicMock()
+        new.is_closed.return_value = False
+        new.url = collector.browser_realtime_search_url("那很了")
+        context = MagicMock()
+        context.pages = [new]
+        self.assertIs(collector.select_search_page(context, old, "那很了"), new)
+
+    def test_closed_browser_stops_with_clear_message(self):
+        context = MagicMock()
+        context.pages = []
+        with self.assertRaisesRegex(SystemExit, "浏览器已关闭"):
+            collector.select_search_page(context, MagicMock(), "那很了")
+
+    def test_login_wait_is_bounded(self):
+        args = collector.parse_args(["--login-timeout", "1"])
+        with patch.object(collector, "require_lxml_html"), \
+             patch.object(collector.time, "monotonic", side_effect=[0, 2]):
+            with self.assertRaisesRegex(SystemExit, "未识别到"):
+                collector.wait_for_realtime_results(MagicMock(), MagicMock(), args)
+
+    def test_login_form_is_not_interrupted_by_navigation(self):
+        args = collector.parse_args([])
+        page = MagicMock()
+        page.url = "https://passport.weibo.com/login"
+        page.is_closed.return_value = False
+        page.wait_for_timeout.side_effect = KeyboardInterrupt
+        context = MagicMock()
+        context.pages = [page]
+        context.cookies.return_value = [{"name": "SUB", "value": "fictional"}]
+        with patch.object(collector, "require_lxml_html"), self.assertRaises(KeyboardInterrupt):
+            collector.wait_for_realtime_results(context, page, args)
+        page.goto.assert_not_called()
+
     def test_user_expression_deduplication(self):
         seen = set()
         pattern = re.compile(collector.DEFAULT_PATTERN)
