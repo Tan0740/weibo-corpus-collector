@@ -56,6 +56,8 @@ def main():
             artifact.replace(results / artifact.name)
     print(f"演示完成：5 条输入，去重后 {count} 条语料。")
     print(f"语料表：{results / 'demo.csv'}")
+    if (results / "demo.xlsx").is_file():
+        print(f"排版后的 Excel：{results / 'demo.xlsx'}")
     print(f"频率表：{results / 'demo_frequency.csv'}")
     print(f"频率图：{results / 'demo_frequency.svg'}")
 
