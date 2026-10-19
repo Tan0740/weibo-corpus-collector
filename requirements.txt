@@ -1,3 +1,4 @@
 requests>=2.28,<3
 lxml>=4.9,<7
 playwright>=1.40,<2
+openpyxl>=3.1,<4
