@@ -15,6 +15,43 @@ def post(username, text, identifier="1"):
 
 
 class CollectorTests(unittest.TestCase):
+    def test_full_text_and_publication_timestamp(self):
+        from lxml import html
+        tree = html.fromstring('''<div class="card-wrap">
+          <a class="name" nick-name="测试用户">测试用户</a>
+          <p node-type="feed_list_content">那很好了...展开全文</p>
+          <p node-type="feed_list_content_full">前文。那很好了。后文完整语境。</p>
+          <p class="from"><a href="https://weibo.com/123/AbC123" date="1792396800000">今天 16:00</a></p>
+        </div>''')
+        posts = collector.parse_search_posts(tree, "https://s.weibo.com/realtime?q=test")
+        self.assertEqual(len(posts), 1)
+        rows = collector.collect_from_post_text(posts[0], re.compile(collector.DEFAULT_PATTERN), set(), 1, 1)
+        self.assertEqual(rows[0].username, "测试用户")
+        self.assertEqual(rows[0].post_text, "前文。那很好了。后文完整语境。")
+        self.assertEqual(rows[0].comment_text, rows[0].post_text)
+        self.assertEqual(rows[0].full_text_status, "full")
+        self.assertEqual(rows[0].published_at, "2026-10-19T16:00:00+08:00")
+        self.assertEqual(rows[0].published_time_raw, "今天 16:00")
+
+    def test_relative_time_not_fabricated(self):
+        from lxml import html
+        tree = html.fromstring('<div><time>5分钟前</time><p node-type="feed_list_content">那很好了</p></div>')
+        metadata = collector.extract_post_metadata(tree)
+        self.assertEqual(metadata, {"published_at": "", "published_time_raw": "5分钟前"})
+        self.assertEqual(collector.extract_search_text(tree)[1], "visible_only")
+
+    def test_old_csv_migration_preserves_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.csv"
+            path.write_text("number,username,corpus,post_text\n1,user,那很好了,完整正文\n", encoding="utf-8-sig")
+            collector.append_rows(str(path), [])
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                row = list(csv.DictReader(stream))[0]
+            self.assertEqual(row["post_text"], "完整正文")
+            self.assertEqual(row["username"], "user")
+            self.assertEqual(row["published_at"], "")
+            self.assertTrue(path.with_suffix(".csv.bak").is_file())
+
     def test_search_url_requires_correct_host_and_keyword(self):
         self.assertTrue(collector.is_keyword_search(collector.browser_realtime_search_url("那很了"), "那很了"))
         self.assertFalse(collector.is_keyword_search("https://me.weibo.com/data/overview", "那很了"))
@@ -25,6 +62,7 @@ class CollectorTests(unittest.TestCase):
         page = MagicMock()
         page.url = "https://me.weibo.com/data/overview"
         page.is_closed.return_value = False
+        page.get_by_role.return_value.count.return_value = 0
         page.goto.side_effect = lambda url, **kwargs: setattr(page, "url", url)
         context = MagicMock()
         context.pages = [page]
