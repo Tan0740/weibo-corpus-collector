@@ -200,9 +200,74 @@ def realtime_tab_is_active(page: Any) -> bool:
     )
 
 
+def is_keyword_search(url: str, keyword: str) -> bool:
+    parsed = urlsplit(url)
+    return (
+        parsed.hostname == "s.weibo.com"
+        and parsed.path.rstrip("/") in {"/realtime", "/weibo"}
+        and dict(parse_qsl(parsed.query)).get("q") == keyword
+    )
+
+
+def select_search_page(context: Any, page: Any, keyword: str) -> Any:
+    pages = [item for item in context.pages if not item.is_closed()]
+    if not pages:
+        raise SystemExit("[停止] 浏览器已关闭；重新运行即可，已保存的语料会继续保留。")
+    for item in reversed(pages):
+        if is_keyword_search(item.url, keyword):
+            return item
+    return page if page in pages else context.new_page()
+
+
+def wait_for_realtime_results(context: Any, page: Any, args: argparse.Namespace) -> tuple[Any, Any, str]:
+    html = require_lxml_html()
+    deadline = time.monotonic() + args.login_timeout
+    next_navigation = 0.0
+    target_url = browser_realtime_search_url(args.keyword)
+    print(f"[浏览器] 自动打开“{args.keyword}”实时搜索；如需登录或验证码，请在浏览器完成，无需回终端按回车。")
+    while time.monotonic() < deadline:
+        page = select_search_page(context, page, args.keyword)
+        current_url = page.url
+        if is_keyword_search(current_url, args.keyword):
+            tree = html.fromstring(page.content())
+            posts = parse_search_posts(tree, current_url)
+            if realtime_tab_is_active(page) and posts:
+                print(f"[浏览器] 实时搜索已就绪，识别到 {len(posts)} 个候选帖子。")
+                return page, tree, current_url
+            if not realtime_tab_is_active(page) and time.monotonic() >= next_navigation:
+                page.goto(target_url, wait_until="domcontentloaded")
+                next_navigation = time.monotonic() + 15
+        else:
+            # Allow login to finish without repeatedly navigating away from its form.
+            has_login = any(
+                item.get("name") == "SUB" and item.get("value")
+                for item in context.cookies(["https://weibo.com", "https://s.weibo.com"])
+            )
+            parsed = urlsplit(current_url)
+            authenticating = (
+                parsed.hostname in {"passport.weibo.com", "passport.weibo.cn", "login.sina.com.cn"}
+                or "login" in parsed.path.lower()
+                or "verify" in parsed.path.lower()
+            )
+            if has_login and not authenticating and time.monotonic() >= next_navigation:
+                print("[浏览器] 检测到登录状态，自动返回指定关键词的实时搜索页。")
+                page.goto(target_url, wait_until="domcontentloaded")
+                next_navigation = time.monotonic() + 15
+        try:
+            page.wait_for_timeout(2000)
+        except Exception:
+            # A login flow may replace its tab. A closed browser is handled above.
+            if not page.is_closed():
+                raise
+    raise SystemExit(
+        f"[停止] {args.login_timeout} 秒内未识别到指定关键词的实时结果。"
+        "可能尚未登录、需要验证、搜索无结果或页面结构已变化。"
+        "可用 --login-timeout 600 延长等待，完成登录后重新运行。"
+    )
+
+
 def open_interactive_browser(args: argparse.Namespace) -> tuple[Any, Any, str, Any, Any, Any]:
     sync_playwright = require_playwright()
-    html = require_lxml_html()
     profile_dir = Path(args.browser_profile_dir).expanduser()
     profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -214,50 +279,9 @@ def open_interactive_browser(args: argparse.Namespace) -> tuple[Any, Any, str, A
             headless=False,
             viewport={"width": 1280, "height": 900},
         )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(BASE_URL, wait_until="domcontentloaded")
-
-        print("\n[浏览器] 已打开微博页面。")
-        print("[浏览器] 请先在弹出的浏览器里完成登录，然后回到这里按回车。")
-        input("[浏览器] 登录完成后按 Enter，脚本会自动打开关键词搜索页：")
-
-        target_url = browser_realtime_search_url(args.keyword)
-        page.goto(target_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-
-        realtime_selected = realtime_tab_is_active(page)
-        realtime_links = page.get_by_role("link", name="实时", exact=True)
-        if realtime_selected:
-            print("[浏览器] 已直接打开“实时”搜索结果。")
-        elif realtime_links.count():
-            realtime_links.first.click()
-            page.wait_for_load_state("domcontentloaded")
-            page.wait_for_timeout(2000)
-            realtime_selected = realtime_tab_is_active(page)
-            if realtime_selected:
-                print("[浏览器] 已自动切换到“实时”搜索结果。")
-            else:
-                print("[浏览器] 已点击“实时”，但页面未确认选中；请手动检查该标签。")
-        else:
-            print("[浏览器] 没有自动找到“实时”入口，请在浏览器中手动点击“实时”。")
-
-        while True:
-            current_url = page.url
-            current_html = page.content()
-            tree = html.fromstring(current_html)
-            post_count = len(parse_search_posts(tree, current_url))
-            if post_count and realtime_selected:
-                print(f"[浏览器] 已在“实时”结果页识别到 {post_count} 个候选帖子。")
-                break
-
-            print(f"[浏览器] 当前页面尚未准备好：{current_url}")
-            print(f"[浏览器] 请确认已登录、搜索词为“{args.keyword}”，并且已经点击“实时”。")
-            answer = input("[浏览器] 页面准备好后按 Enter 重试，输入 q 退出：").strip().lower()
-            if answer == "q":
-                raise SystemExit("已取消采集：浏览器中没有可识别的微博实时搜索结果。")
-            page.wait_for_load_state("domcontentloaded")
-            page.wait_for_timeout(2000)
-            realtime_selected = realtime_tab_is_active(page)
+        page = context.new_page()
+        page.goto(browser_realtime_search_url(args.keyword), wait_until="domcontentloaded")
+        page, tree, current_url = wait_for_realtime_results(context, page, args)
 
         cookies = context.cookies()
         user_agent = page.evaluate("navigator.userAgent")
@@ -265,8 +289,14 @@ def open_interactive_browser(args: argparse.Namespace) -> tuple[Any, Any, str, A
         return session, tree, current_url, playwright, context, page
     except BaseException:
         if context is not None:
-            context.close()
-        playwright.stop()
+            try:
+                context.close()
+            except Exception:
+                pass
+        try:
+            playwright.stop()
+        except Exception:
+            pass
         raise
 
 
@@ -1102,6 +1132,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=3.0, help="请求间最小等待秒数")
     parser.add_argument("--max-delay", type=float, default=8.0, help="请求间最大等待秒数")
     parser.add_argument("--timeout", type=int, default=15, help="请求超时秒数")
+    parser.add_argument("--login-timeout", type=int, default=300, help="等待登录及实时搜索就绪的最长秒数（默认：300）")
     parser.add_argument("--frequency-only", action="store_true", help="仅统计 --output 指定的已有 CSV，不联网或登录")
     return parser.parse_args(argv)
 
@@ -1116,8 +1147,8 @@ def main(argv: list[str] | None = None) -> None:
         return
     if not (0 <= args.min_delay <= args.max_delay < float('inf')):
         raise SystemExit("等待时间必须满足 0 <= --min-delay <= --max-delay，且为有限值")
-    if args.limit < 0 or args.max_search_pages < 1 or args.timeout <= 0:
-        raise SystemExit("--limit 必须 >= 0，--max-search-pages 和 --timeout 必须 > 0")
+    if args.limit < 0 or args.max_search_pages < 1 or args.timeout <= 0 or args.login_timeout <= 0:
+        raise SystemExit("--limit 必须 >= 0，页数和超时必须 > 0")
     if not args.keyword.strip():
         raise SystemExit("--keyword 不能为空")
     try:
@@ -1128,6 +1159,18 @@ def main(argv: list[str] | None = None) -> None:
         collect(args)
     except KeyboardInterrupt:
         print(f"\n[停止] 已由用户停止采集，现有数据已保存在：{args.output}")
+    except Exception as exc:
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+        except ImportError:
+            raise exc
+        if isinstance(exc, PlaywrightError):
+            raise SystemExit(
+                f"[浏览器错误] {exc}\n"
+                f"已保存的语料保留在：{args.output}。"
+                "请保持浏览器开启；若刚才关闭了浏览器，重新运行即可续采。"
+            ) from None
+        raise
 
 
 if __name__ == "__main__":
