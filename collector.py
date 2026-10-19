@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from html import unescape
 from pathlib import Path
 from typing import Any, Iterable
@@ -42,6 +43,9 @@ class SearchPost:
     comment_url: str
     post_text: str
     source_url: str
+    published_at: str = ""
+    published_time_raw: str = ""
+    full_text_status: str = "visible_only"
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,9 @@ class CorpusRow:
     weibo_id: str
     comment_page_url: str
     post_text: str
+    published_at: str = ""
+    published_time_raw: str = ""
+    full_text_status: str = "visible_only"
 
 
 @dataclass(frozen=True)
@@ -209,6 +216,20 @@ def is_keyword_search(url: str, keyword: str) -> bool:
     )
 
 
+def expand_search_posts(page: Any) -> None:
+    links = page.get_by_role("link", name=re.compile(r"^(展开全文|展开)$"))
+    for index in reversed(range(min(links.count(), 50))):
+        link = links.nth(index)
+        if link.is_visible():
+            try:
+                link.click(timeout=3000)
+                page.wait_for_timeout(300)
+            except Exception:
+                if page.is_closed():
+                    raise
+                print("[正文] 部分长微博未能展开，将标注为 visible_only。")
+
+
 def select_search_page(context: Any, page: Any, keyword: str) -> Any:
     pages = [item for item in context.pages if not item.is_closed()]
     if not pages:
@@ -232,6 +253,8 @@ def wait_for_realtime_results(context: Any, page: Any, args: argparse.Namespace)
             tree = html.fromstring(page.content())
             posts = parse_search_posts(tree, current_url)
             if realtime_tab_is_active(page) and posts:
+                expand_search_posts(page)
+                tree = html.fromstring(page.content())
                 print(f"[浏览器] 实时搜索已就绪，识别到 {len(posts)} 个候选帖子。")
                 return page, tree, current_url
             if not realtime_tab_is_active(page) and time.monotonic() >= next_navigation:
@@ -370,6 +393,35 @@ def extract_post_username(container: Any) -> str:
     return ""
 
 
+def extract_post_metadata(container: Any) -> dict[str, str]:
+    nodes = container.xpath(".//a[@date] | .//time | .//*[contains(concat(' ', normalize-space(@class), ' '), ' from ')]//a[1] | .//span[@class='ct']")
+    raw = ""
+    published = ""
+    for node in nodes:
+        raw = raw or clean_text(" ".join(node.itertext()))
+        stamp = node.get("date") or node.get("datetime") or node.get("title") or ""
+        if stamp.isdigit() and len(stamp) in {10, 13}:
+            seconds = int(stamp) / (1000 if len(stamp) == 13 else 1)
+            published = datetime.fromtimestamp(seconds, timezone(timedelta(hours=8))).isoformat()
+        elif re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", stamp):
+            published = stamp
+        if published:
+            break
+    if not published:
+        match = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?", raw)
+        published = match.group(0) if match else ""
+    return {"published_at": published, "published_time_raw": raw}
+
+
+def extract_search_text(container: Any) -> tuple[str, str]:
+    full = container.xpath(".//*[@node-type='feed_list_content_full']")
+    nodes = full or container.xpath(".//*[@node-type='feed_list_content']")
+    if not nodes:
+        nodes = container.xpath(".//p | .//article")
+    text = clean_text(" ".join(nodes[0].itertext())) if nodes else ""
+    return text, "full" if full else "visible_only"
+
+
 def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
     posts: list[SearchPost] = []
     seen_ids: set[str] = set()
@@ -394,6 +446,7 @@ def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
                 comment_url=absolute_url(comment_links[-1].split("#")[0]),
                 post_text=extract_post_text(div),
                 source_url=source_url,
+                **extract_post_metadata(div),
             )
         )
 
@@ -416,11 +469,7 @@ def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
         if not permalink or permalink in seen_ids:
             continue
 
-        text_nodes = card.xpath(
-            ".//p[@node-type='feed_list_content_full' or "
-            "@node-type='feed_list_content'][1]//text()"
-        )
-        post_text = clean_text(" ".join(text_nodes))
+        post_text, full_text_status = extract_search_text(card)
         seen_ids.add(permalink)
         posts.append(
             SearchPost(
@@ -429,6 +478,8 @@ def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
                 comment_url=f"{BASE_URL}/comment/{permalink}",
                 post_text=post_text,
                 source_url=source_url,
+                full_text_status=full_text_status,
+                **extract_post_metadata(card),
             )
         )
 
@@ -446,15 +497,7 @@ def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
         if container is None:
             continue
 
-        text_nodes = container.xpath(
-            ".//p[@node-type='feed_list_content_full' or "
-            "@node-type='feed_list_content']//text()"
-        )
-        if not text_nodes:
-            text_nodes = container.xpath(".//p//text()")
-        if not text_nodes:
-            text_nodes = container.xpath(".//article//text()")
-        post_text = clean_text(" ".join(text_nodes))
+        post_text, full_text_status = extract_search_text(container)
 
         seen_ids.add(permalink)
         posts.append(
@@ -464,6 +507,8 @@ def parse_search_posts(tree: Any, source_url: str) -> list[SearchPost]:
                 comment_url=f"{BASE_URL}/comment/{permalink}",
                 post_text=post_text,
                 source_url=source_url,
+                full_text_status=full_text_status,
+                **extract_post_metadata(container),
             )
         )
     return posts
@@ -636,6 +681,9 @@ def ensure_table_schema(path: str, fieldnames: list[str]) -> None:
                 "weibo_id": row.get("weibo_id") or "",
                 "comment_page_url": row.get("comment_page_url") or "",
                 "post_text": row.get("post_text") or "",
+                "published_at": row.get("published_at") or "",
+                "published_time_raw": row.get("published_time_raw") or "",
+                "full_text_status": row.get("full_text_status") or "visible_only",
             }
             writer.writerow(migrated)
     print(f"[表格] 已升级旧表头，原文件备份为：{backup_path}")
@@ -653,6 +701,9 @@ def append_rows(path: str, rows: Iterable[CorpusRow]) -> None:
         "weibo_id",
         "comment_page_url",
         "post_text",
+        "published_at",
+        "published_time_raw",
+        "full_text_status",
     ]
     ensure_table_schema(path, fieldnames)
     exists = os.path.exists(path) and os.path.getsize(path) > 0
@@ -757,6 +808,12 @@ def write_frequency_outputs(path: str, chart_limit: int = 30) -> None:
         )
     svg.append("</svg>")
     frequency_svg.write_text("\n".join(svg), encoding="utf-8")
+    try:
+        from excel_export import export_excel
+        excel_path = export_excel(path)
+        print(f"[表格] 已生成排版后的 Excel：{excel_path}")
+    except (ImportError, OSError) as exc:
+        print(f"[表格] CSV 已保留，但 Excel 导出失败：{exc}。请安装 requirements.txt 中的依赖，或关闭正在打开的同名 Excel 后重试。")
 
 
 def search_url(keyword: str, page: int) -> str:
@@ -951,16 +1008,15 @@ def collect_from_post_text(
                 number=next_number,
                 username=post.username,
                 corpus=corpus,
-                comment_text=sentence_context(
-                    post.post_text,
-                    match.start(),
-                    match.end(),
-                ),
+                comment_text=post.post_text,
                 source=post.source_url,
                 note="实时搜索微博正文",
                 weibo_id=post.weibo_id,
                 comment_page_url=post.comment_url,
                 post_text=post.post_text,
+                published_at=post.published_at,
+                published_time_raw=post.published_time_raw,
+                full_text_status=post.full_text_status,
             )
         )
         break
@@ -1024,6 +1080,7 @@ def collect(args: argparse.Namespace) -> None:
                 if browser_page is not None:
                     browser_page.goto(url, wait_until="domcontentloaded")
                     browser_page.wait_for_timeout(1500)
+                    expand_search_posts(browser_page)
                     url = browser_page.url
                     tree = require_lxml_html().fromstring(browser_page.content())
                 else:
