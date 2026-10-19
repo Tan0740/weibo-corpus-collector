@@ -1,98 +1,146 @@
 # 微博构式语料采集与频率分析
 
-面向汉语语法研究的 Python 命令行工具。以“那很X了”为案例，从微博实时搜索结果提取构式实例，保留用户名与来源，按“用户名 + 构式实例”去重，并提供 CSV 频率表与 SVG 柱状图生成函数。
+一个面向语言研究和文本分析的开源 Python 命令行工具。从微博搜索结果的正文中提取符合规则的表达，按“用户名 + 匹配文本”去重，保存 CSV，并生成频率表与 SVG 柱状图。默认以“那很X了”为例，也可以调整为其他关键词和构式。
 
-## 研究问题与处理流程
+## 安装
 
-研究中的同一表达可能来自不同用户。直接按文本去重会丢失频率信息，而不去重又会重复统计同一用户的相同表达。因此，本项目使用二元组 `(username, corpus)` 判断重复：同一用户的相同表达只收录一次，不同用户的相同表达允许收录。
-
-处理流程：人工登录 → 实时搜索结果 → 页面解析 → 正则提取 → 用户与构式联合去重 → CSV 保存 → 频率统计。
-
-## 快速开始
-
-建议 Python 3.10 或更新版本。在仓库目录执行：
+需要 Python 3.10 或更新版本。在终端执行：
 
 ```bash
+git clone https://github.com/Tan0740/weibo-corpus-collector.git
+cd weibo-corpus-collector
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
 ```
 
-Windows 可用 `.venv\Scripts\activate` 激活环境。
+macOS / Linux 激活环境：
 
-## 面试离线演示
+```bash
+source .venv/bin/activate
+```
 
-不需要平台账号或网络请求，全部使用虚构数据：
+Windows PowerShell 激活环境：
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+安装依赖及在线采集需要的浏览器：
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+## 开始采集
+
+```bash
+python collector.py --interactive-browser --keyword "那很了" --limit 300 --output results/corpus.csv
+```
+
+1. 在弹出的 Chromium 浏览器中登录自己的微博账号。
+2. 回到终端按 Enter，程序会打开指定关键词的实时搜索页。
+3. 如遇登录验证，由使用者在浏览器中完成；若未选中“实时”，请手动点击，再在终端按 Enter 重试。
+4. 识别到候选帖子后按页采集。累计达到目标条数时结束，也可按 Ctrl+C 提前停止。
+
+输出目录自动创建。正常结束或在采集循环中按 Ctrl+C 停止后，会根据已保存语料生成频率表和图。在线结果取决于登录状态、页面结构和平台可见内容，不能保证一定获得目标数量；当前结果不足时会循环检查新内容，可手动停止。
+
+## 调整关键词与提取规则
+
+`--keyword` 是提交给微博的搜索词，决定候选帖子范围。`--pattern` 是 Python 正则表达式，决定从候选正文中提取什么。仅改搜索词不会自动更改匹配规则。
+
+默认搜索词为 `那很了`，默认正则：
+
+```text
+那很[^，。！？、\s]{1,12}?了
+```
+
+它匹配“那很”和“了”之间包含 1 到 12 个非指定标点、非空白字符的表达，如“那很好吃了”。`1,12` 控制中间部分长度，`?` 表示尽量在较近的“了”结束。它筛选候选文本，不自动判定词性或语法合格性。
+
+例如，改为收集“太X了”的表达：
+
+```bash
+python collector.py --interactive-browser --keyword "太 了" --pattern "太[^，。！？、\s]{1,12}?了" --limit 100 --output results/tai_x_le.csv
+```
+
+搜索结果先由微博决定，正则不会搜遍全站。搜索词过窄可能遗漏表达，过宽可能引入无关帖子，请根据结果调整并人工复核。正则使用引号包裹；研究不同构式时建议使用不同输出文件。
+
+## 调整语料数量
+
+`--limit` 表示输出 CSV 的累计记录目标，单位是“条记录”，不是汉字数、词数或不同关键词数。
+
+| 设置 | 含义 |
+| --- | --- |
+| `--limit 100` | 累计到 100 条后停止 |
+| `--limit 300` | 累计到 300 条后停止（默认） |
+| `--limit 1000` | 累计到 1000 条后停止 |
+| `--limit 0` | 不设数量上限，按 Ctrl+C 停止 |
+
+从零开始采集 500 条，用一个不存在的新文件名：
+
+```bash
+python collector.py --interactive-browser --keyword "那很了" --limit 500 --output results/new_corpus_500.csv
+```
+
+同一文件已有 200 条时，`--limit 300` 只会补至 300 条；已有条数达到或超过目标时不会再登录采集，也不会截断旧文件。更换文件名从 0 开始。重复运行同一个文件会续采，不能当作清空操作。
+
+## 去重和统计口径
+
+同一用户名的同一匹配文本只保留一条，不同用户名的相同表达允许保留。单条微博当前最多收录一个符合规则的新匹配；解析不到用户名的微博不收录。因此统计的是此采集与去重口径下的样本频次，不代表全平台总体频率。用户名也不等同于稳定的用户 ID。
+
+| 文件 | 内容 |
+| --- | --- |
+| `results/corpus.csv` | 编号、用户名、匹配表达、上下文和来源 |
+| `results/corpus_frequency.csv` | `rank` 排名、`corpus` 表达、`frequency` 频次、`unique_users` 独立用户名数 |
+| `results/corpus_frequency.svg` | 频次前 30 项柱状图，可在浏览器打开 |
+
+对已有 CSV 重新统计，不联网：
+
+```bash
+python collector.py --frequency-only --output results/corpus.csv
+```
+
+原始 CSV 字段：`number`（编号）、`username`（用户名）、`corpus`（匹配表达）、`comment_text`（上下文）、`source`（搜索页）、`note`（备注）、`weibo_id`（微博标识）、`comment_page_url`（移动版链接）、`post_text`（正文）。部分字段命名来自早期版本；当前采集的是微博正文，不是评论区。
+
+## 离线示例
+
+可以先运行虚构数据示例，检查提取、去重和统计输出，不需要微博登录、浏览器安装或第三方依赖：
 
 ```bash
 python demo.py
 ```
 
-输入的 5 条虚构文本中，有 1 条属于同一用户名的重复表达。输出 4 条语料，以及以下文件：
+5 条输入去重后保留 4 条记录：“那很好吃了”2 次，“那很幸运了”和“那很期待了”各 1 次。文件写入 `results/demo.csv`、`results/demo_frequency.csv` 和 `results/demo_frequency.svg`。重复运行只会重建这三个示例文件。
 
-| 文件 | 内容 |
-| --- | --- |
-| `results/demo.csv` | 去重后的构式实例与完整文本 |
-| `results/demo_frequency.csv` | 频次、排名与独立用户名数 |
-| `results/demo_frequency.svg` | 高频构式柱状图，可直接在浏览器打开 |
+## 其他参数
 
-预期频率：“那很好吃了”2 次，“那很幸运了”和“那很期待了”各 1 次。重复运行演示会重建这三个演示文件。
+运行 `python collector.py --help` 查看全部参数。
 
-## 在线采集
+| 参数 | 默认值 | 用途 |
+| --- | --- | --- |
+| `--keyword` | 那很了 | 微博搜索关键词 |
+| `--pattern` | 上述默认正则 | 从正文提取语料 |
+| `--limit` | 300 | CSV 累计目标条数，0 表示不限 |
+| `--output` | 脚本目录下的 results/corpus.csv | CSV 路径，已有文件续采 |
+| `--min-delay` / `--max-delay` | 3 / 8 秒 | 两页之间的随机等待范围 |
+| `--max-search-pages` | 50 | 最多翻至该页，再返回第一页检查新内容 |
+| `--timeout` | 15 秒 | Cookie 请求模式超时；不控制浏览器超时 |
+| `--browser-profile-dir` | 脚本目录下的 weibo_browser_profile | 本地浏览器登录资料目录 |
+| `--frequency-only` | 关闭 | 只对已有 CSV 生成统计 |
 
-首次安装浏览器：
+交互浏览器模式为推荐流程。不加 `--interactive-browser` 时使用 Cookie 请求模式，需通过 `WEIBO_COOKIE` 环境变量或 `--cookie-file` 提供自己的 Cookie；该模式使用移动版搜索，可用性与交互实时搜索不同。`--max-comment-pages-per-post` 是兼容旧版本的参数，当前正文采集不使用它。
 
-```bash
-python -m playwright install chromium
-```
-
-从一个新的输出文件采集，达到累计 300 条时结束：
-
-```bash
-python collector.py --interactive-browser --limit 300 --output results/live_demo.csv
-```
-
-先运行一次离线演示，或手动创建 `results` 目录。按终端提示登录微博，脚本会打开“那很了”的实时搜索结果；需要验证码时由使用者手动完成。再次指定同一个 CSV 会接着已有条数续采；从零演示请使用新文件名。按 `Ctrl+C` 停止，已写入的语料仍保留。
-
-当前交互采集流程提取的是实时搜索中的微博正文，不逐条进入评论区。文件名和部分字段保留了早期评论采集版本的命名。
-
-采集完成后生成频率表和图：
+## 运行检查
 
 ```bash
-python -c "from collector import write_frequency_outputs; write_frequency_outputs('results/live_demo.csv')"
+python -m unittest discover -s tests -v
 ```
 
-## 输出字段
+测试使用虚构数据和模拟页面请求，不需要微博账号。离线测试验证提取、去重、累计数量限制和频率输出；在线采集仍需要使用者在当前平台环境下完成登录并验证。
 
-| 字段 | 含义 |
-| --- | --- |
-| `number` | 记录编号 |
-| `username` | 发布用户名 |
-| `corpus` | 命中的构式实例 |
-| `comment_text` | 含构式的文本片段 |
-| `source` | 来源搜索页面 |
-| `note` | 来源备注 |
-| `weibo_id` | 微博标识 |
-| `comment_page_url` | 对应微博移动版链接 |
-| `post_text` | 微博正文 |
+## 许可与贡献
 
-默认正则为 `那很[^，。！？、\s]{1,12}?了`，可通过 `--pattern` 调整。它用于候选语料筛选，不等同于词性标注；最终研究语料仍需人工复核。
+代码采用 [MIT License](LICENSE)，允许使用、修改和分发，需保留许可声明。软件许可不授予对第三方平台内容的额外权利。请遵守平台规则及研究伦理，仅采集有权限访问的内容。
 
-## 技术实现与展示要点
+欢迎通过 Issues 报告问题，或通过 Pull Requests 改进解析和统计功能。报告解析问题时请移除 Cookie、登录信息及不必要的个人数据。`.gitignore` 默认排除浏览器资料、真实语料和生成结果。
 
-- Playwright 处理人工登录后的动态页面，lxml 解析结果。
-- 正则模式参数化，便于调整构式研究口径。
-- 集合维护联合去重键，保留跨用户重复表达的分布。
-- CSV 支持续采，目标数量按文件中累计记录计算。
-- 频率输出按出现次数降序排列，同时统计独立用户名数。
-- SVG 图表直接生成，无需额外绘图库。
-
-## 当前限制
-
-在线结果依赖平台页面结构、登录状态和搜索可见范围。结果不足时程序会循环检查，不能保证一定获得 300 条；需手动停止。频次表示已收集样本中的出现次数，不代表全平台总体分布。当前版本不提供自动词性分析。
-
-真实语料、登录资料和生成结果默认被 `.gitignore` 排除。公开演示只使用虚构数据。在线采集请遵守平台规则，并使用有权限访问的内容。
-
-## 项目来源
-
-本项目源于围绕 [dataabc/weiboSpider](https://github.com/dataabc/weiboSpider) 的微博语料研究实践。此展示目录仅包含当前独立采集脚本及演示支持文件，不打包第三方仓库；第三方项目的原始实现不作为本项目自行开发的成果。面试中可重点说明研究需求如何转化为提取规则、联合去重和频率统计流程。
+项目起源于围绕 [dataabc/weiboSpider](https://github.com/dataabc/weiboSpider) 的语料研究实践。本仓库发布独立采集脚本及配套工具，不包含该第三方仓库；第三方代码及许可归其原作者所有。

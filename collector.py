@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Collect Weibo comment corpus for a target sentence pattern.
+Collect matching corpus records from Weibo search result post text.
 
-This script uses the lightweight weibo.cn pages instead of automating the
-JavaScript-heavy desktop site. It visits search result pages, opens each
-result's comment page, extracts matching comments, and stops after the target
-number of examples is collected.
+Interactive mode reads realtime search pages after manual login.
+Records are deduplicated by username and matched expression.
 """
 
 from __future__ import annotations
@@ -253,7 +251,7 @@ def open_interactive_browser(args: argparse.Namespace) -> tuple[Any, Any, str, A
                 break
 
             print(f"[浏览器] 当前页面尚未准备好：{current_url}")
-            print("[浏览器] 请确认已登录、搜索词为“那很了”，并且已经点击“实时”。")
+            print(f"[浏览器] 请确认已登录、搜索词为“{args.keyword}”，并且已经点击“实时”。")
             answer = input("[浏览器] 页面准备好后按 Enter 重试，输入 q 退出：").strip().lower()
             if answer == "q":
                 raise SystemExit("已取消采集：浏览器中没有可识别的微博实时搜索结果。")
@@ -614,6 +612,7 @@ def ensure_table_schema(path: str, fieldnames: list[str]) -> None:
 
 
 def append_rows(path: str, rows: Iterable[CorpusRow]) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "number",
         "username",
@@ -944,6 +943,11 @@ def collect(args: argparse.Namespace) -> None:
     effective_limit = sys.maxsize if unlimited else args.limit
     append_rows(args.output, [])
 
+    if not unlimited and load_row_count(args.output) >= effective_limit:
+        write_frequency_outputs(args.output)
+        print(f"[完成] 文件已有 {load_row_count(args.output)} 条，已达到目标 {args.limit} 条。")
+        return
+
     first_tree = None
     first_url = None
     playwright_driver = None
@@ -1035,6 +1039,8 @@ def collect(args: argparse.Namespace) -> None:
                 progress = str(total) if unlimited else f"{total}/{args.limit}"
                 print(f"[正文] 第 {page_number} 页没有新的匹配语料，进度 {progress}")
 
+            if total >= effective_limit:
+                break
             wait(args)
             page_number += 1
             if page_number > args.max_search_pages:
@@ -1053,24 +1059,25 @@ def collect(args: argparse.Namespace) -> None:
                 playwright_driver.stop()
             except Exception:
                 pass
+        write_frequency_outputs(args.output)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="按微博搜索结果采集评论区里符合“那很XX了”结构的语料。"
+        description="从微博实时搜索正文提取语料，按用户名与匹配文本去重并生成频率统计。"
     )
     parser.add_argument("--keyword", default="那很了", help="微博搜索关键词，例如：那很了")
-    parser.add_argument("--pattern", default=DEFAULT_PATTERN, help="匹配评论的正则")
+    parser.add_argument("--pattern", default=DEFAULT_PATTERN, help="提取语料的正则；修改搜索词后请同步检查此参数")
     parser.add_argument(
         "--limit",
         type=int,
         default=300,
-        help="目标采集条数（默认：300）",
+        help="CSV 累计目标条数（默认：300）；0 表示不限条数，Ctrl+C 停止",
     )
     parser.add_argument(
         "--output",
-        default=str(Path(__file__).resolve().parent / "na_hen_xx_le_fresh_corpus.csv"),
-        help="CSV 输出路径",
+        default=str(Path(__file__).resolve().parent / "results" / "corpus.csv"),
+        help="CSV 输出路径，已有文件自动续采；新文件从 0 开始",
     )
     parser.add_argument("--cookie", help="微博 cookie 字符串")
     parser.add_argument("--cookie-file", help="保存微博 cookie 的文本文件")
@@ -1095,13 +1102,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=3.0, help="请求间最小等待秒数")
     parser.add_argument("--max-delay", type=float, default=8.0, help="请求间最大等待秒数")
     parser.add_argument("--timeout", type=int, default=15, help="请求超时秒数")
+    parser.add_argument("--frequency-only", action="store_true", help="仅统计 --output 指定的已有 CSV，不联网或登录")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv or sys.argv[1:])
-    if args.min_delay > args.max_delay:
-        raise SystemExit("--min-delay 不能大于 --max-delay")
+    if args.frequency_only:
+        if not Path(args.output).is_file():
+            raise SystemExit(f"找不到语料文件：{args.output}")
+        write_frequency_outputs(args.output)
+        print(f"[完成] 频率表与频率图：{frequency_output_paths(args.output)}")
+        return
+    if not (0 <= args.min_delay <= args.max_delay < float('inf')):
+        raise SystemExit("等待时间必须满足 0 <= --min-delay <= --max-delay，且为有限值")
+    if args.limit < 0 or args.max_search_pages < 1 or args.timeout <= 0:
+        raise SystemExit("--limit 必须 >= 0，--max-search-pages 和 --timeout 必须 > 0")
+    if not args.keyword.strip():
+        raise SystemExit("--keyword 不能为空")
+    try:
+        re.compile(args.pattern)
+    except re.error as exc:
+        raise SystemExit(f"--pattern 正则无效：{exc}") from exc
     try:
         collect(args)
     except KeyboardInterrupt:
